@@ -2,7 +2,7 @@ import json
 import os
 import subprocess
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import streamlit as st
@@ -11,10 +11,13 @@ PROJECT_DIR = Path(__file__).resolve().parent
 PIPELINE = PROJECT_DIR / "run_pipeline.sh"
 RESULTS_DIR = PROJECT_DIR / "results"
 UPLOAD_DIR = PROJECT_DIR / "demo_uploads"
+DEFAULT_WIDTH = 1280
+DEFAULT_HEIGHT = 720
+DEFAULT_FPS = 30
 
 SVT_APP = PROJECT_DIR / "SvtAv1EncApp"
-VTM_APP = PROJECT_DIR / "EncoderApp"
-SVT_LIB_PATTERNS = ["libSvtAv1Enc.so", "libSvtAv1Enc.so.4", "libSvtAv1Enc.so.4.1.0"]
+VVENC_APP = PROJECT_DIR / "vvencapp"
+SVT_LIB_NAMES = ["libSvtAv1Enc.so.4", "libSvtAv1Enc.so", "libSvtAv1Enc.so.4.1.0"]
 
 st.set_page_config(
     page_title="Project 2502M - Real Encoder CSV Demo",
@@ -62,31 +65,29 @@ def check_required_files() -> list[str]:
         (PROJECT_DIR / "intra_prediction_analysis.py", "intra_prediction_analysis.py"),
         (PROJECT_DIR / "intra_mode_utilities.py", "intra_mode_utilities.py"),
         (SVT_APP, "SvtAv1EncApp"),
-        (VTM_APP, "EncoderApp"),
+        (VVENC_APP, "vvencapp"),
     ]
     for path, name in required:
         if not path.exists():
             problems.append(f"Missing {name}")
 
-    missing_libs = [name for name in SVT_LIB_PATTERNS if not (PROJECT_DIR / name).exists()]
-    if missing_libs:
-        problems.append("Missing SVT-AV1 shared libraries: " + ", ".join(missing_libs))
+    if not any((PROJECT_DIR / name).exists() for name in SVT_LIB_NAMES):
+        problems.append("Missing SVT-AV1 shared library: one of " + ", ".join(SVT_LIB_NAMES))
     return problems
 
 
 def make_outputs_zip() -> Path:
     zip_path = PROJECT_DIR / "project2502m_outputs.zip"
+
     include_files = [
         PROJECT_DIR / "av1_stats.csv",
-        PROJECT_DIR / "vvc_stats.csv",
-        PROJECT_DIR / "vvc_runtime.cfg",
-        RESULTS_DIR / "vvc_runtime.cfg",
+        PROJECT_DIR / "vvc_intra_modes.csv",
         RESULTS_DIR / "analysis_summary.json",
         RESULTS_DIR / "ANALYSIS_REPORT.txt",
         RESULTS_DIR / "PIPELINE_SUMMARY.txt",
         RESULTS_DIR / "pipeline.log",
         RESULTS_DIR / "output_av1.ivf",
-        RESULTS_DIR / "output_vvc.bin",
+        RESULTS_DIR / "output_vvc.266",
     ]
 
     with ZipFile(zip_path, "w", ZIP_DEFLATED) as zf:
@@ -164,9 +165,6 @@ with st.sidebar:
         generator = st.selectbox("FFmpeg generator", ["testsrc", "smptebars", "mandelbrot", "color"])
 
     st.header("Encoding / Analysis Settings")
-    width = st.number_input("Width", min_value=160, max_value=3840, value=1280, step=16)
-    height = st.number_input("Height", min_value=120, max_value=2160, value=720, step=16)
-    fps = st.slider("FPS", min_value=5, max_value=60, value=30, step=1)
     frames = st.slider("Frames to encode/analyze", min_value=1, max_value=180, value=10, step=1)
     qp = st.slider("QP", min_value=18, max_value=45, value=30, step=1)
     duration = st.slider("Generated duration (seconds)", min_value=1, max_value=10, value=3, step=1)
@@ -183,7 +181,7 @@ with st.sidebar:
 
 st.markdown("### Live Demo Flow")
 st.write(
-    "User input → modified SVT-AV1/VTM encoding → real CSV validation → "
+    "User input → modified SVT-AV1/VVenC encoding → real CSV validation → "
     "64×64 grid normalization → near real-time visualization."
 )
 
@@ -196,9 +194,9 @@ if analyze:
     command = [
         "bash",
         str(PIPELINE),
-        "--width", str(width),
-        "--height", str(height),
-        "--fps", str(fps),
+        "--width", str(DEFAULT_WIDTH),
+        "--height", str(DEFAULT_HEIGHT),
+        "--fps", str(DEFAULT_FPS),
         "--frames", str(frames),
         "--qp", str(qp),
         "--output-dir", "results",
@@ -209,7 +207,8 @@ if analyze:
             st.error("Please upload a video first.")
             st.stop()
         UPLOAD_DIR.mkdir(exist_ok=True)
-        input_path = UPLOAD_DIR / uploaded_file.name
+        upload_name = PureWindowsPath(Path(uploaded_file.name).name).name or "uploaded_video.mp4"
+        input_path = UPLOAD_DIR / upload_name
         with input_path.open("wb") as f:
             f.write(uploaded_file.getbuffer())
         command += ["--input", str(input_path)]
@@ -237,11 +236,11 @@ if summary:
     vvc_grid = vvc.get("normalized_grid", {})
 
     av1_size = file_size_mb(RESULTS_DIR / "output_av1.ivf")
-    vvc_size = file_size_mb(RESULTS_DIR / "output_vvc.bin")
+    vvc_size = file_size_mb(RESULTS_DIR / "output_vvc.266")
     gain = ((av1_size - vvc_size) / av1_size * 100) if av1_size > 0 and vvc_size > 0 else None
 
     av1_csv = PROJECT_DIR / "av1_stats.csv"
-    vvc_csv = PROJECT_DIR / "vvc_stats.csv"
+    vvc_csv = PROJECT_DIR / "vvc_intra_modes.csv"
 
     st.markdown("### Raw encoder output")
     c1, c2, c3, c4 = st.columns(4)
@@ -262,7 +261,7 @@ if summary:
     st.markdown("### Real CSV Validation")
     v1, v2 = st.columns(2)
     v1.write(f"`av1_stats.csv`: {count_csv_rows(av1_csv):,} rows")
-    v2.write(f"`vvc_stats.csv`: {count_csv_rows(vvc_csv):,} rows")
+    v2.write(f"`vvc_intra_modes.csv`: {count_csv_rows(vvc_csv):,} rows")
 
     st.markdown("### Raw Mode Distribution")
     col1, col2 = st.columns(2)

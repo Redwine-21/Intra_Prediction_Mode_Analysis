@@ -1,6 +1,7 @@
-numpy>=1.24.0
-matplotlib>=3.7.0
-opencv-python>=4.8.0
-seaborn>=0.12.0
-pandas>=2.0.0
+# Python dependencies for Project 2502M.
+# System tools such as ffmpeg, ffprobe, SvtAv1EncApp and vvencapp are not
+# installed by pip and must be available separately.
+
+numpy>=1.26.0
+matplotlib>=3.8.0
 streamlit>=1.32.0

@@ -6,7 +6,7 @@
 #   input video
 #     -> ffmpeg converts to YUV
 #     -> modified SVT-AV1 writes av1_stats.csv by fprintf
-#     -> modified VTM EncoderApp writes vvc_stats.csv by fprintf
+#     -> modified VVenC vvencapp writes vvc_intra_modes.csv
 #     -> intra_prediction_analysis.py reads both CSV files and generates plots/report
 #
 # This script DOES NOT create synthetic/content-derived CSV files.
@@ -35,9 +35,8 @@ QP=30
 DURATION=3
 GENERATE=""
 AV1_STATS_FILE="av1_stats.csv"
-VVC_STATS_FILE="vvc_stats.csv"
+VVC_STATS_FILE="vvc_intra_modes.csv"
 PYTHON_BIN="${PYTHON_BIN:-$(if [ -x ./.venv/bin/python3 ]; then echo ./.venv/bin/python3; else echo python3; fi)}"
-VVC_BASE_CFG="encoder_intra_vtm.cfg"
 
 usage(){
   cat <<EOF
@@ -54,9 +53,18 @@ Options:
   --qp N               Encoder QP. Default: 30
   --generate NAME      Generate input with ffmpeg lavfi: testsrc, smptebars, color, mandelbrot
   --av1-stats PATH     AV1 real stats CSV path. Default: av1_stats.csv
-  --vvc-stats PATH     VVC real stats CSV path. Default: vvc_stats.csv
-  --vvc-base-cfg PATH   VTM base config. Default: encoder_intra_vtm.cfg
+  --vvc-stats PATH     VVC real stats CSV path. Default: vvc_intra_modes.csv
 EOF
+}
+
+require_option_value(){
+  local opt="$1"
+  local value="${2:-}"
+  if [[ -z "$value" || "$value" == --* ]]; then
+    print_error "Missing value for $opt"
+    usage
+    exit 2
+  fi
 }
 
 if [[ $# -gt 0 && "${1:-}" != --* ]]; then
@@ -70,18 +78,17 @@ if [[ $# -gt 0 && "${1:-}" != --* ]]; then
 else
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --input) INPUT_VIDEO="$2"; shift 2 ;;
-      --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-      --width) WIDTH="$2"; shift 2 ;;
-      --height) HEIGHT="$2"; shift 2 ;;
-      --fps) FPS="$2"; shift 2 ;;
-      --frames) FRAMES="$2"; shift 2 ;;
-      --duration) DURATION="$2"; shift 2 ;;
-      --qp) QP="$2"; shift 2 ;;
-      --generate) GENERATE="$2"; shift 2 ;;
-      --av1-stats) AV1_STATS_FILE="$2"; shift 2 ;;
-      --vvc-stats) VVC_STATS_FILE="$2"; shift 2 ;;
-      --vvc-base-cfg) VVC_BASE_CFG="$2"; shift 2 ;;
+      --input) require_option_value "$1" "${2:-}"; INPUT_VIDEO="$2"; shift 2 ;;
+      --output-dir) require_option_value "$1" "${2:-}"; OUTPUT_DIR="$2"; shift 2 ;;
+      --width) require_option_value "$1" "${2:-}"; WIDTH="$2"; shift 2 ;;
+      --height) require_option_value "$1" "${2:-}"; HEIGHT="$2"; shift 2 ;;
+      --fps) require_option_value "$1" "${2:-}"; FPS="$2"; shift 2 ;;
+      --frames) require_option_value "$1" "${2:-}"; FRAMES="$2"; shift 2 ;;
+      --duration) require_option_value "$1" "${2:-}"; DURATION="$2"; shift 2 ;;
+      --qp) require_option_value "$1" "${2:-}"; QP="$2"; shift 2 ;;
+      --generate) require_option_value "$1" "${2:-}"; GENERATE="$2"; shift 2 ;;
+      --av1-stats) require_option_value "$1" "${2:-}"; AV1_STATS_FILE="$2"; shift 2 ;;
+      --vvc-stats) require_option_value "$1" "${2:-}"; VVC_STATS_FILE="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) print_error "Unknown argument: $1"; usage; exit 2 ;;
     esac
@@ -89,6 +96,10 @@ else
 fi
 
 mkdir -p "$OUTPUT_DIR" "$OUTPUT_DIR/av1" "$OUTPUT_DIR/vvc"
+if [[ -z "${MPLCONFIGDIR:-}" ]]; then
+  export MPLCONFIGDIR="$OUTPUT_DIR/.matplotlib"
+  mkdir -p "$MPLCONFIGDIR"
+fi
 LOG_FILE="$OUTPUT_DIR/pipeline.log"
 : > "$LOG_FILE"
 
@@ -97,6 +108,22 @@ export LD_LIBRARY_PATH="$PWD:${LD_LIBRARY_PATH:-}"
 log_cmd(){
   print_info "$*"
   "$@" 2>&1 | tee -a "$LOG_FILE"
+}
+
+log_cmd_in_dir(){
+  local dir="$1"
+  shift
+  print_info "(cd $dir && $*)"
+  (cd "$dir" && "$@") 2>&1 | tee -a "$LOG_FILE"
+}
+
+abs_path(){
+  local path="$1"
+  if [[ "$path" == /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s/%s\n' "$PWD" "$path"
+  fi
 }
 
 resolve_binary(){
@@ -115,13 +142,31 @@ require_cmd(){
 
 clean_old_outputs(){
   print_header "STEP 0: CLEANING OLD OUTPUTS"
+
   rm -f "$AV1_STATS_FILE" "$VVC_STATS_FILE"
   rm -f analysis_summary.json
   rm -f vvc_runtime.cfg
-  rm -f "$OUTPUT_DIR/output_av1.ivf" "$OUTPUT_DIR/output_vvc.bin" "$OUTPUT_DIR/recon_vvc.yuv"
-  rm -f "$OUTPUT_DIR/analysis_summary.json" "$OUTPUT_DIR/ANALYSIS_REPORT.txt" "$OUTPUT_DIR/vvc_runtime.cfg"
+
+  rm -f "$OUTPUT_DIR/output_av1.ivf"
+  rm -f "$OUTPUT_DIR/output_vvc.266"
+  rm -f "$OUTPUT_DIR/output_vvc.bin"
+  rm -f "$OUTPUT_DIR/output_vvc.vvc"
+  rm -f "$OUTPUT_DIR/output_vvc.bit"
+  rm -f "$OUTPUT_DIR/recon_vvc.yuv"
+
+  rm -f "$OUTPUT_DIR/analysis_summary.json"
+  rm -f "$OUTPUT_DIR/ANALYSIS_REPORT.txt"
+  rm -f "$OUTPUT_DIR/PIPELINE_SUMMARY.txt"
+  rm -f "$OUTPUT_DIR/vvc_runtime.cfg"
+  rm -f "$OUTPUT_DIR/pipeline.log"
+
+  rm -f "$OUTPUT_DIR/converted_input_"*.yuv
+  rm -f "$OUTPUT_DIR/generated_"*.mp4
+  rm -rf "$OUTPUT_DIR/vvc_per_frame_csv"
+
   rm -rf "$OUTPUT_DIR/av1" "$OUTPUT_DIR/vvc"
   mkdir -p "$OUTPUT_DIR/av1" "$OUTPUT_DIR/vvc"
+
   print_success "Old CSV/results removed"
 }
 
@@ -208,72 +253,176 @@ encode_av1(){
   print_success "AV1 real CSV: $AV1_STATS_FILE"
 }
 
-write_vvc_runtime_cfg(){
-  local cfg_root="vvc_runtime.cfg"
-  local cfg_out="$OUTPUT_DIR/vvc_runtime.cfg"
+csv_frame_count(){
+  "$PYTHON_BIN" - "$1" <<'PY'
+import csv
+import sys
+from pathlib import Path
 
-  cat > "$cfg_root" <<EOF
-# Runtime input/output generated by run_pipeline.sh
-InputFile                    : $YUV_INPUT
-BitstreamFile                : $OUTPUT_DIR/output_vvc.bin
-ReconFile                    : $OUTPUT_DIR/recon_vvc.yuv
+path = Path(sys.argv[1])
+frames = set()
+if path.exists():
+    with path.open(newline="", encoding="utf-8", errors="replace") as fh:
+        for row in csv.reader(fh):
+            if not row or row[0].strip().startswith("#"):
+                continue
+            if row[0].strip().lower() in {"frame_num", "frame", "poc"}:
+                continue
+            if len(row) < 7:
+                continue
+            try:
+                frames.add(int(row[0]))
+            except ValueError:
+                continue
+print(len(frames))
+PY
+}
 
-# Video format
-FrameRate                    : $FPS
-FrameSkip                    : 0
-SourceWidth                  : $WIDTH
-SourceHeight                 : $HEIGHT
-InputBitDepth                : 8
-InternalBitDepth             : 8
-InputChromaFormat            : 420
-FramesToBeEncoded            : $FRAMES
+append_remapped_vvc_csv(){
+  local src_csv="$1"
+  local frame_num="$2"
+  local dst_csv="$3"
 
-# Rate control / all-intra
-QP                           : $QP
-GOPSize                      : 1
-IntraPeriod                  : 1
-DecodingRefreshType          : 1
+  "$PYTHON_BIN" - "$src_csv" "$frame_num" "$dst_csv" <<'PY'
+import csv
+import sys
+from pathlib import Path
 
-# Safe defaults
-ConformanceWindowMode        : 1
-EOF
+src = Path(sys.argv[1])
+frame_num = sys.argv[2]
+dst = Path(sys.argv[3])
 
-  cp "$cfg_root" "$cfg_out"
-  print_success "VVC runtime config written: $cfg_root"
+if not src.exists() or src.stat().st_size == 0:
+    raise SystemExit(f"missing per-frame VVC CSV: {src}")
+
+rows = 0
+with src.open(newline="", encoding="utf-8", errors="replace") as in_fh, dst.open(
+    "a", newline="", encoding="utf-8"
+) as out_fh:
+    reader = csv.reader(in_fh)
+    writer = csv.writer(out_fh, lineterminator="\n")
+    for row in reader:
+        if not row or row[0].strip().startswith("#"):
+            continue
+        if row[0].strip().lower() in {"frame_num", "frame", "poc"}:
+            continue
+        if len(row) < 7:
+            continue
+        row[0] = frame_num
+        writer.writerow(row)
+        rows += 1
+
+if rows == 0:
+    raise SystemExit(f"no valid rows in per-frame VVC CSV: {src}")
+PY
+}
+
+rebuild_vvc_csv_per_frame(){
+  local bin="$1"
+  local bin_abs
+  local yuv_abs
+  local output_abs
+  local fallback_dir
+  local merged_csv
+  local frame
+
+  bin_abs="$(abs_path "$bin")"
+  yuv_abs="$(abs_path "$YUV_INPUT")"
+  output_abs="$(abs_path "$OUTPUT_DIR")"
+  fallback_dir="$output_abs/vvc_per_frame_csv"
+  merged_csv="$fallback_dir/merged_vvc_intra_modes.csv"
+
+  rm -rf "$fallback_dir"
+  mkdir -p "$fallback_dir"
+  : > "$merged_csv"
+
+  print_info "Rebuilding VVC CSV with one real VVenC encode per frame. This is slower, but avoids missing-frame CSV dumps."
+
+  for ((frame = 0; frame < FRAMES; frame++)); do
+    local frame_dir="$fallback_dir/frame_${frame}"
+    mkdir -p "$frame_dir"
+
+    log_cmd_in_dir "$frame_dir" "$bin_abs" \
+      -i "$yuv_abs" \
+      -s "${WIDTH}x${HEIGHT}" \
+      -r "$FPS" \
+      --preset medium \
+      -q "$QP" \
+      -f 1 \
+      -fs "$frame" \
+      --intraperiod 1 \
+      --refreshtype idr \
+      --threads 1 \
+      --mtprofile 0 \
+      --ifp 0 \
+      -o "$frame_dir/output_vvc_${frame}.266"
+
+    append_remapped_vvc_csv "$frame_dir/vvc_intra_modes.csv" "$frame" "$merged_csv"
+    print_success "VVC per-frame CSV appended for frame $frame"
+  done
+
+  cp "$merged_csv" "$VVC_STATS_FILE"
+}
+
+ensure_vvc_csv_frame_count(){
+  local bin="$1"
+  local actual_frames
+
+  actual_frames="$(csv_frame_count "$VVC_STATS_FILE")"
+  if [[ "$actual_frames" == "$FRAMES" ]]; then
+    print_success "VVC CSV frame count matches requested frames: $actual_frames/$FRAMES"
+    return 0
+  fi
+
+  print_info "VVC CSV contains $actual_frames frame(s), expected $FRAMES. Running per-frame VVC CSV fallback."
+  rebuild_vvc_csv_per_frame "$bin"
+
+  actual_frames="$(csv_frame_count "$VVC_STATS_FILE")"
+  [[ "$actual_frames" == "$FRAMES" ]] || {
+    print_error "VVC CSV still has $actual_frames frame(s), expected $FRAMES after per-frame fallback"
+    exit 1
+  }
+  print_success "VVC CSV rebuilt with complete frame count: $actual_frames/$FRAMES"
 }
 
 encode_vvc(){
-  print_header "STEP 3: ENCODING WITH VVC (VTM)"
+  print_header "STEP 3: ENCODING WITH VVC (VVenC)"
 
   local bin=""
-  bin=$(resolve_binary EncoderApp || resolve_binary VTMEncoderApp || true)
-  [[ -n "$bin" ]] || { print_error "EncoderApp/VTMEncoderApp not found"; exit 1; }
+  bin=$(resolve_binary vvencapp || true)
+  [[ -n "$bin" ]] || { print_error "vvencapp not found"; exit 1; }
 
   rm -f "$VVC_STATS_FILE"
-  write_vvc_runtime_cfg
 
-  if [[ -f "$VVC_BASE_CFG" ]]; then
-    log_cmd "$bin" -c "$VVC_BASE_CFG" -c vvc_runtime.cfg
-  else
-    print_info "Base VTM config not found: $VVC_BASE_CFG. Running with runtime config only."
-    log_cmd "$bin" -c vvc_runtime.cfg
-  fi
+  log_cmd "$bin" \
+    -i "$YUV_INPUT" \
+    -s "${WIDTH}x${HEIGHT}" \
+    -r "$FPS" \
+    --preset medium \
+    -q "$QP" \
+    -f "$FRAMES" \
+    --intraperiod 1 \
+    --refreshtype idr \
+    -o "$OUTPUT_DIR/output_vvc.266"
 
-  [[ -s "$OUTPUT_DIR/output_vvc.bin" ]] || { print_error "VVC bitstream was not created"; exit 1; }
-  [[ -s "$VVC_STATS_FILE" ]] || { print_error "Missing VVC real CSV: $VVC_STATS_FILE. Check fprintf in VTM source and run the rebuilt EncoderApp."; exit 1; }
+  [[ -s "$OUTPUT_DIR/output_vvc.266" ]] || { print_error "VVC bitstream was not created"; exit 1; }
+  [[ -s "$VVC_STATS_FILE" ]] || { print_error "Missing VVC real CSV: $VVC_STATS_FILE. Check fprintf in VVenC source and run the rebuilt vvencapp."; exit 1; }
+  ensure_vvc_csv_frame_count "$bin"
 
-  print_success "VVC bitstream: $OUTPUT_DIR/output_vvc.bin"
+  print_success "VVC bitstream: $OUTPUT_DIR/output_vvc.266"
   print_success "VVC real CSV: $VVC_STATS_FILE"
 }
 
 validate_csv(){
   print_header "STEP 4: VALIDATING REAL ENCODER CSV"
-  "$PYTHON_BIN" - "$AV1_STATS_FILE" "$VVC_STATS_FILE" <<'PY'
+  "$PYTHON_BIN" - "$FRAMES" "$AV1_STATS_FILE" "$VVC_STATS_FILE" <<'PY'
 import csv
 import sys
 from pathlib import Path
 
-for path in sys.argv[1:]:
+expected_frames = int(sys.argv[1])
+
+for path in sys.argv[2:]:
     p = Path(path)
     if not p.exists() or p.stat().st_size == 0:
         raise SystemExit(f"{path}: missing or empty")
@@ -302,6 +451,12 @@ for path in sys.argv[1:]:
 
     if ok == 0:
         raise SystemExit(f"{path}: no valid 7-column rows")
+    if len(frames) != expected_frames:
+        frame_list = ",".join(str(v) for v in sorted(frames))
+        raise SystemExit(
+            f"{path}: expected {expected_frames} frame(s), found {len(frames)} "
+            f"frame(s): [{frame_list}]"
+        )
     print(f"{path}: OK ({ok} rows, {len(frames)} frames, {len(modes)} modes)")
 PY
 }
@@ -333,17 +488,19 @@ QP: $QP
 
 Outputs:
 - $AV1_STATS_FILE    (must be dumped by modified SVT-AV1 source)
-- $VVC_STATS_FILE    (must be dumped by modified VTM source)
+- $VVC_STATS_FILE    (must be dumped by modified VVenC source)
 - $OUTPUT_DIR/output_av1.ivf
-- $OUTPUT_DIR/output_vvc.bin
+- $OUTPUT_DIR/output_vvc.266
 - $OUTPUT_DIR/analysis_summary.json
 - $OUTPUT_DIR/ANALYSIS_REPORT.txt
 - $OUTPUT_DIR/av1/*.png
 - $OUTPUT_DIR/vvc/*.png
 
 Important:
-This pipeline does not create fallback/synthetic/content-derived CSV files.
-If either CSV is missing, the pipeline fails.
+This pipeline does not create synthetic/content-derived CSV files.
+If VVenC dumps too few frames in a multi-frame run, the pipeline rebuilds the
+VVC CSV by running real one-frame VVenC encodes and remapping frame indices.
+If either real encoder CSV is missing or incomplete after that, the pipeline fails.
 EOF
   cat "$report"
   print_success "Pipeline summary written: $report"

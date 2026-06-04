@@ -86,7 +86,9 @@ class CsvIntraModeAnalyzer:
             raise ValueError("codec must be 'av1' or 'vvc'")
         self.csv_path = Path(csv_path)
         self.num_frames = num_frames
-        self.grid_size = grid_size
+        self.grid_size = int(grid_size)
+        if self.grid_size <= 0:
+            raise ValueError("grid_size must be a positive integer")
         self.blocks: List[BlockInfo] = []
 
     def load(self) -> List[BlockInfo]:
@@ -224,10 +226,35 @@ class CsvIntraModeAnalyzer:
         spatial_cell_counts: Dict[Tuple[int, int], Counter] = defaultdict(Counter)
 
         for block in self.blocks:
-            gx = min(grid_w - 1, max(0, block.x // grid_size))
-            gy = min(grid_h - 1, max(0, block.y // grid_size))
-            per_frame_cell_counts[(block.frame_num, gy, gx)][block.intra_mode] += 1
-            spatial_cell_counts[(gy, gx)][block.intra_mode] += 1
+            block_x0 = max(0, block.x)
+            block_y0 = max(0, block.y)
+            block_x1 = min(frame_width, block.x + block.width)
+            block_y1 = min(frame_height, block.y + block.height)
+            if block_x1 <= block_x0 or block_y1 <= block_y0:
+                continue
+
+            gx0 = max(0, block_x0 // grid_size)
+            gy0 = max(0, block_y0 // grid_size)
+            gx1 = min(grid_w - 1, (block_x1 - 1) // grid_size)
+            gy1 = min(grid_h - 1, (block_y1 - 1) // grid_size)
+
+            for gy in range(gy0, gy1 + 1):
+                cell_y0 = gy * grid_size
+                cell_y1 = min(frame_height, cell_y0 + grid_size)
+                overlap_y = min(block_y1, cell_y1) - max(block_y0, cell_y0)
+                if overlap_y <= 0:
+                    continue
+
+                for gx in range(gx0, gx1 + 1):
+                    cell_x0 = gx * grid_size
+                    cell_x1 = min(frame_width, cell_x0 + grid_size)
+                    overlap_x = min(block_x1, cell_x1) - max(block_x0, cell_x0)
+                    if overlap_x <= 0:
+                        continue
+
+                    overlap_area = int(overlap_x * overlap_y)
+                    per_frame_cell_counts[(block.frame_num, gy, gx)][block.intra_mode] += overlap_area
+                    spatial_cell_counts[(gy, gx)][block.intra_mode] += overlap_area
 
         grid_mode_counts: Counter = Counter()
         for counter in per_frame_cell_counts.values():
